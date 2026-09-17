@@ -1,0 +1,20 @@
+{
+  "source": "Fuente 04 · Historias Clínicas Neonatales",
+  "mode": "clinical_cohort",
+  "privacy": "anonymized_only",
+  "direct_identifiers_excluded": ["nombre_madre", "expediente", "cedula_profesional", "nombre_medico", "fecha_nacimiento_materna", "localidad_exacta"],
+  "case_id_format": "HC-{seq:04d}",
+  "variables": {
+    "record": ["case_id", "fecha_elaboracion", "fecha_nacimiento_rn", "hora_nacimiento"],
+    "maternal": ["edad_materna", "escolaridad", "ocupacion", "estado_civil", "grupo_rh", "inicio_control_prenatal", "consultas_prenatales", "vih", "vdrl", "numero_usg", "alcohol", "tabaco", "vacuna_covid", "vacuna_influenza", "vacuna_tetanos", "alergias", "acido_folico", "hierro_acido_folico", "edad_padre", "tiempo_traslado_min"],
+    "obstetric": ["gestas", "partos", "cesareas", "abortos", "hijos_vivos", "antecedentes_infecciosos", "ivu", "cervicovaginitis", "trastorno_hipertensivo", "trastorno_metabolico", "otros_factores", "amenaza_aborto", "amenaza_parto_pretermino", "maduracion_pulmonar", "trabajo_parto", "via_nacimiento", "motivo_cesarea", "analgesia", "liquido_amniotico", "membranas"],
+    "neonatal": ["sexo", "capurro_semanas", "apgar_1", "apgar_5", "silverman", "reanimacion", "oxigeno", "hipoxia_perinatal", "trauma_obstetrico", "peso_g", "talla_cm", "pc_cm", "pt_cm", "pa_cm", "si_cm", "pie_cm", "peso_para_edad", "hemotipo_rn", "diagnosticos_rn", "estado_salud", "destino_rn"],
+    "discharge": ["fecha_egreso", "peso_egreso_g", "diagnostico_egreso", "succion", "uresis", "evacuacion", "ictericia", "soplo", "destino_egreso"]
+  },
+  "rules": {
+    "no_raw_clinical_documents_in_public_repo": true,
+    "no_direct_identifiers_in_api": true,
+    "clinical_prediction_requires_validation": true,
+    "source_state_labels": ["REAL", "SIMULADO", "PREDICHO"]
+  }
+}
