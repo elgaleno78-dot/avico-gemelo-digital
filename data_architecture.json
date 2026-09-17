@@ -1,0 +1,26 @@
+{
+  "name": "AVICO — Gemelo Digital Inteligente de Ginecología y Obstetricia",
+  "version": "2026-09-17",
+  "privacy": "Solo datos operativos agregados o anonimizados; no exponer identificadores directos.",
+  "sources": [
+    {
+      "id": "source_01",
+      "name": "Nacimientos 2026",
+      "feeds": "NACIMIENTOS",
+      "use": ["nacimientos", "partos vaginales", "cesáreas", "distribución temporal"]
+    },
+    {
+      "id": "source_02",
+      "name": "Censo Universal",
+      "feeds": "HOSPITALIZACIÓN / PISO GINECO-OBSTETRICIA",
+      "use": ["ocupación de camas", "disponibilidad", "estancia", "diagnósticos agrupados", "histórico de piso"]
+    },
+    {
+      "id": "source_03",
+      "name": "Base Admisión Gineco-Obstetricia 2026",
+      "feeds": "CONSULTAS DE TRIAGE",
+      "use": ["consultas por día", "consultas por turno", "consultas por hora", "picos de demanda", "tendencias"]
+    }
+  ],
+  "rule": "No usar Censo Universal como denominador de consultas de Triage y no usar Base Admisión como ocupación de Piso."
+}
