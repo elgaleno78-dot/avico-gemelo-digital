@@ -9,3 +9,11 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.7
+      - key: BIRTHS_SHEET_ID
+        value: 1SJGGbbUGA2pTmouDi-tOFi_kVmtSVFhGFXBq70kFOTw
+      - key: BIRTHS_GID
+        value: 405341237
+      - key: CENSUS_XLSX_URL
+        sync: false
+      - key: TRIAGE_XLSX_URL
+        sync: false
