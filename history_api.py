@@ -2,17 +2,35 @@ import source_patch as patched
 from app import normdate,normtime,today
 from flask import jsonify,request
 from openpyxl import load_workbook
-import os,io,re,datetime,csv,requests
+import os,io,re,datetime,csv,requests,unicodedata
 app=patched.app; getbytes=patched.getbytes
 EXPECTED={str(300+i):f'{i:02d}' for i in range(1,25)};EXPECTED.update({f'AISL{i}':f'{24+i:02d}' for i in range(1,4)})
+def clean(s):return ''.join(c for c in unicodedata.normalize('NFD',str(s or '').upper()) if unicodedata.category(c)!='Mn')
+def hdp(dx):
+ s=clean(dx)
+ # Clasifica solo diagnósticos textualmente registrados; no infiere enfermedad a partir de TA/laboratorios.
+ if re.search(r'\bECLAMPS',s):return 'eclampsia'
+ if 'HELLP' in s:return 'hellp'
+ if 'PREECLAMP' in s or re.search(r'\bPRECLAMP',s):return 'preeclampsia'
+ if ('HIPERTENSION' in s or re.search(r'\bHTA\b',s)) and ('GESTACIONAL' in s or 'GESTACION' in s or 'EMBARAZ' in s):return 'hipertension_gestacional'
+ return None
 def census_sheet(ws,d):
- seen={}
+ seen={};cats={'preeclampsia':[],'eclampsia':[],'hipertension_gestacional':[],'hellp':[]}
  for row in ws.iter_rows(values_only=True):
   if len(row)<3:continue
-  raw=row[0];bed=str(int(raw)) if isinstance(raw,(int,float)) and float(raw).is_integer() else str(raw or '').strip().upper();service=str(row[1] or '').strip().upper()
-  if bed in EXPECTED and bed not in seen and 'GINECO' in service:seen[bed]=bool(str(row[2] or '').strip())
+  raw=row[0];bed=str(int(raw)) if isinstance(raw,(int,float)) and float(raw).is_integer() else str(raw or '').strip().upper();service=clean(row[1])
+  if bed in EXPECTED and bed not in seen and 'GINECO' in service:
+   occupied=bool(str(row[2] or '').strip());seen[bed]=occupied
+   if occupied:
+    # El censo conocido usa DIAGNOSTICOS después de edad; se revisan únicamente columnas clínicas posteriores a la cama/servicio/nombre.
+    diagnosis=' | '.join(str(x or '') for x in row[3:12]);cat=hdp(diagnosis)
+    if cat:cats[cat].append(EXPECTED[bed])
  if len(seen)<20:return None
- occ=sorted((EXPECTED[k] for k,v in seen.items() if v),key=int);return {'date':d.isoformat(),'occupied':len(occ),'available':27-len(occ),'occupancy_pct':round(100*len(occ)/27,1),'occupied_beds':occ,'status':'REAL'}
+ occ=sorted((EXPECTED[k] for k,v in seen.items() if v),key=int)
+ for k in cats:cats[k]=sorted(set(cats[k]),key=int)
+ allbeds=sorted(set(sum(cats.values(),[])),key=int)
+ hypertension={'total':len(allbeds),'beds':allbeds,'preeclampsia':len(cats['preeclampsia']),'preeclampsia_beds':cats['preeclampsia'],'eclampsia':len(cats['eclampsia']),'eclampsia_beds':cats['eclampsia'],'hipertension_gestacional':len(cats['hipertension_gestacional']),'hipertension_gestacional_beds':cats['hipertension_gestacional'],'hellp':len(cats['hellp']),'hellp_beds':cats['hellp'],'method':'DIAGNÓSTICO REGISTRADO EN CENSO'}
+ return {'date':d.isoformat(),'occupied':len(occ),'available':27-len(occ),'occupancy_pct':round(100*len(occ)/27,1),'occupied_beds':occ,'hypertensive_disorders':hypertension,'status':'REAL'}
 def census_history(days):
  data=getbytes(os.getenv('CENSUS_XLSX_URL'));wb=load_workbook(io.BytesIO(data),read_only=True,data_only=True);out={};start=today()-datetime.timedelta(days=days-1)
  for ws in wb.worksheets:
@@ -32,7 +50,7 @@ def triage_history(days):
    labels=[str(x or '').strip().upper() for x in row]
    if any('FOLIO' in x for x in labels) and any(x=='FECHA' or x.startswith('FECHA ') for x in labels) and any('HORA' in x for x in labels):header=(rn,labels);break
   if not header:continue
-  hr,labels=header;fi=next((i for i,x in enumerate(labels) if 'FOLIO' in x),None);di=next((i for i,x in enumerate(labels) if x=='FECHA' or x.startswith('FECHA ')),None);ti=next((i for i,x in enumerate(labels) if 'HORA' in x),None)
+  hr,labels=header;fi=next((i for i,x in enumerate(labels) if 'FOLIO' in x),None);di=next((i for i,x in enumerate(labels) if x=='FECHA' or x.startswith('FECHA ') for x in labels),None);ti=next((i for i,x in enumerate(labels) if 'HORA' in x),None)
   for n,row in enumerate(ws.iter_rows(min_row=hr+1,values_only=True)):
    d=normdate(row[di] if di is not None and di<len(row) else None)
    if not d or not(start<=d<=today()):continue
