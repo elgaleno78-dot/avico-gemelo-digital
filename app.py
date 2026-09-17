@@ -1,63 +1,95 @@
-from flask import Flask, jsonify, render_template, request
-import random, math, datetime, os
+from flask import Flask,jsonify,render_template,request
+import random,math,datetime,os,io,re
 from zoneinfo import ZoneInfo
-
-app=Flask(__name__)
-TZ=ZoneInfo("America/Cancun")
-BASE={"seed":20260917,"admissions_day":30.5,"shift_weights":{"Matutino":13.3,"Vespertino":8.7,"Nocturno":8.4},"births_day":7.5,"vaginal_probability":.59,"cesarean_probability":.41,"admission_probability":.55,"floor_capacity":27,"initial_floor_occupancy":22,"labor_capacity":9,"initial_labor_occupancy":4,"tococirugia_capacity":10,"recovery_capacity":5,"physicians_per_shift":4,"triage_minutes":35,"labor_minutes":280,"vaginal_minutes":45,"cesarean_minutes":70,"recovery_minutes":130,"floor_stay_minutes":1500,"cleaning_minutes":40,"triage_queue_alert":6}
+import requests
+from openpyxl import load_workbook
+app=Flask(__name__); TZ=ZoneInfo('America/Cancun')
+BASE={'seed':20260917,'admissions_day':30.5,'births_day':7.5,'cesarean_probability':.41,'admission_probability':.55,'floor_capacity':27,'initial_floor_occupancy':22,'labor_capacity':9,'initial_labor_occupancy':4,'physicians_per_shift':4,'triage_minutes':35}
 PHEDS=[]
-for i in range(1,25): PHEDS.append({"id":f"H{i:02d}","area":"Hospitalización GO","censable":True,"oxygen":True,"isolation":False})
-for i in range(25,28): PHEDS.append({"id":f"H{i:02d}","area":"Hospitalización GO · Aislamiento","censable":True,"oxygen":True,"isolation":True})
-for i in range(1,11): PHEDS.append({"id":f"T{i:02d}","area":"Tococirugía","censable":False,"oxygen":i<10,"isolation":False})
-PHEDS += [{"id":"E01","area":"Expulsión","censable":False,"oxygen":True,"isolation":False},{"id":"M01","area":"Sala Mixta","censable":False,"oxygen":True,"isolation":False},{"id":"UT01","area":"Urgencias Tococirugía","censable":False,"oxygen":True,"isolation":False,"fictitious":True}]
-for i in range(1,6): PHEDS.append({"id":f"RP{i:02d}","area":"Recuperación Postparto","censable":False,"oxygen":i<5,"isolation":False})
-
+for i in range(1,25): PHEDS.append({'id':f'H{i:02d}','area':'Hospitalización GO','censable':True})
+for i in range(25,28): PHEDS.append({'id':f'H{i:02d}','area':'Hospitalización GO · Aislamiento','censable':True})
+for i in range(1,11): PHEDS.append({'id':f'T{i:02d}','area':'Tococirugía','censable':False})
+PHEDS += [{'id':'E01','area':'Expulsión','censable':False},{'id':'M01','area':'Sala Mixta','censable':False},{'id':'UT01','area':'Urgencias Tococirugía','censable':False}]
+for i in range(1,6): PHEDS.append({'id':f'RP{i:02d}','area':'Recuperación Postparto','censable':False})
 def now(): return datetime.datetime.now(TZ)
-def cutoff(): return now().date().isoformat()
-def source_state(name,kind,last_date,status,note):
-    today=cutoff(); valid=bool(last_date and last_date<=today); stale=not valid or last_date<today
-    return {"name":name,"type":kind,"status":status if valid else "NO CONECTADA","last_valid_date":last_date if valid else None,"cutoff_date":today,"stale":stale,"note":note}
-
-def sources():
-    # Fechas verificadas al corte inicial. Cuando Render tenga credenciales/endpoint, los adaptadores sustituyen estos valores automáticamente.
-    return [
-      source_state("Nacimientos 2026","Google Sheets","2026-09-16","REAL · CORTE VERIFICADO","Último registro válido ≤ fecha actual. Lectura directa pendiente de credencial de servicio en Render."),
-      source_state("Censo de Piso / Labor","XLSX mensual","2026-09-16","REAL · CORTE VERIFICADO","Usar únicamente la última hoja diaria válida ≤ hoy; ignorar hojas futuras/plantillas."),
-      source_state("Ingresos de Urgencias / Triage","Excel / OneDrive",None,"HISTÓRICO","No presentar 30.5/día como dato actual hasta que Render pueda leer la fuente directamente.")]
-
-def poisson(lam,rng):
-    l=math.exp(-lam); k=0; q=1.
-    while q>l: k+=1; q*=rng.random()
-    return k-1
-
-def simulate(days=7,params=None):
-    p=dict(BASE); p.update(params or {}); rng=random.Random(int(p["seed"])); floor=min(int(p["initial_floor_occupancy"]),int(p["floor_capacity"])); labor=min(int(p["initial_labor_occupancy"]),int(p["labor_capacity"])); rows=[]; ta=tb=tc=peakq=peaklabor=0
-    for d in range(days):
-        adm=poisson(float(p["admissions_day"]),rng); admitted=sum(rng.random()<float(p["admission_probability"]) for _ in range(adm)); births=poisson(float(p["births_day"]),rng); cs=sum(rng.random()<float(p["cesarean_probability"]) for _ in range(births)); vaginal=births-cs; labor_entries=max(0,min(admitted,poisson(max(1,births*1.15),rng))); labor_exits=min(labor+labor_entries,births); labor=max(0,min(int(p["labor_capacity"]),labor+labor_entries-labor_exits)); recover=min(int(p["recovery_capacity"]),births); floor_entries=min(admitted,max(0,births+poisson(max(1,admitted*.18),rng))); discharges=max(0,poisson(max(1,floor/1.2),rng)); floor=max(0,min(int(p["floor_capacity"]),floor+floor_entries-discharges)); q=max(0,round(adm/24*float(p["triage_minutes"])/60-int(p["physicians_per_shift"]))); peakq=max(peakq,q); peaklabor=max(peaklabor,labor); ta+=adm; tb+=births; tc+=cs
-        rows.append({"day":d+1,"date":(now().date()+datetime.timedelta(days=d)).isoformat(),"emergency_arrivals":adm,"urgency_discharges":adm-admitted,"hospital_admissions":admitted,"labor_entries":labor_entries,"labor_occupancy":labor,"labor_capacity":int(p["labor_capacity"]),"labor_pct":round(100*labor/int(p["labor_capacity"]),1),"births":births,"vaginal":vaginal,"cesareans":cs,"recovery_occupancy":recover,"floor_occupancy":floor,"floor_pct":round(100*floor/int(p["floor_capacity"]),1),"triage_queue":q})
-    return {"mode":"SIMULADO","days":rows,"summary":{"emergency_arrivals":ta,"births":tb,"cesareans":tc,"vaginal":tb-tc,"peak_floor_pct":max((x["floor_pct"] for x in rows),default=0),"peak_labor_occupancy":peaklabor,"peak_triage_queue":peakq},"parameters":p}
-
+def today(): return now().date()
+def normdate(v):
+    if isinstance(v,(datetime.date,datetime.datetime)): return v.date() if isinstance(v,datetime.datetime) else v
+    if not v:return None
+    s=str(v).strip()
+    for f in ('%d/%m/%Y','%d/%m/%y','%Y-%m-%d'):
+        try:return datetime.datetime.strptime(s,f).date()
+        except:pass
+    return None
+def getbytes(url):
+    if not url:return None
+    r=requests.get(url,timeout=15); r.raise_for_status(); return r.content
+def sheet_csv(sheet_id,gid):
+    url=f'https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}'
+    r=requests.get(url,timeout=15); r.raise_for_status(); return r.text
+def live_births():
+    try:
+        sid=os.getenv('BIRTHS_SHEET_ID','1SJGGbbUGA2pTmouDi-tOFi_kVmtSVFhGFXBq70kFOTw'); gid=os.getenv('BIRTHS_GID','405341237'); import csv
+        rows=list(csv.reader(io.StringIO(sheet_csv(sid,gid)))); vals=[]
+        for row in rows[1:]:
+            if len(row)>5:
+                d=normdate(row[3]); typ=row[5].strip().lower()
+                if d and d<=today() and typ in ('parto','cesarea','cesárea'): vals.append((d,typ))
+        if not vals:return None
+        last=max(d for d,_ in vals); day=[x for x in vals if x[0]==last]; return {'value':len(day),'vaginal':sum(t=='parto' for _,t in day),'cesareans':sum(t!='parto' for _,t in day),'last_valid_date':last.isoformat(),'status':'REAL · EN VIVO'}
+    except Exception as e:return {'value':None,'last_valid_date':None,'status':'SIN CONEXIÓN','error':str(e)[:100]}
+def live_xlsx(url,kind):
+    try:
+        data=getbytes(url)
+        if not data:return None
+        wb=load_workbook(io.BytesIO(data),read_only=True,data_only=True); candidates=[]
+        for ws in wb.worksheets:
+            m=re.fullmatch(r'0?(\d{1,2})',ws.title.strip())
+            if m:
+                d=datetime.date(today().year,today().month,int(m.group(1)))
+                if d<=today():candidates.append((d,ws))
+        if not candidates:return None
+        d,ws=max(candidates,key=lambda x:x[0]); rows=list(ws.iter_rows(values_only=True)); occ=set(); labor=0; triage=0
+        for row in rows:
+            txt=' | '.join(str(x or '') for x in row).upper()
+            if kind=='census' and 'GINECO' in txt:
+                bed=str(row[0] or '').strip() if row else ''
+                if re.fullmatch(r'\d{1,2}',bed): occ.add(int(bed))
+                if 'LABOR' in txt or 'TOCOCIR' in txt: labor+=1
+            if kind=='triage':
+                ds=[normdate(x) for x in row[:12]]
+                if d in ds:triage+=1
+        return {'value':len(occ) if kind=='census' else triage,'labor':labor if kind=='census' else None,'last_valid_date':d.isoformat(),'status':'REAL · EN VIVO'}
+    except Exception as e:return {'value':None,'last_valid_date':None,'status':'SIN CONEXIÓN','error':str(e)[:100]}
 def real_state():
-    ss=sources(); return {"mode":"REAL","as_of":now().isoformat(),"cutoff_date":cutoff(),"sources":ss,"births":{"value":None,"label":"Fuente conectable","last_valid_date":ss[0]["last_valid_date"]},"floor":{"value":None,"capacity":27,"last_valid_date":ss[1]["last_valid_date"]},"labor":{"value":None,"capacity":9,"last_valid_date":ss[1]["last_valid_date"]},"triage":{"value":None,"last_valid_date":ss[2]["last_valid_date"]},"message":"El Monitor no sustituye datos reales faltantes con simulación. Configure adaptadores/credenciales de Render para actualización automática."}
-
+    b=live_births(); c=live_xlsx(os.getenv('CENSUS_XLSX_URL'),'census'); t=live_xlsx(os.getenv('TRIAGE_XLSX_URL'),'triage')
+    src=[{'name':'Nacimientos 2026','status':b['status'] if b else 'SIN CONEXIÓN','last_valid_date':b.get('last_valid_date') if b else None},{'name':'Censo Piso / Labor','status':c['status'] if c else 'CONFIGURAR URL','last_valid_date':c.get('last_valid_date') if c else None},{'name':'Urgencias / Triage','status':t['status'] if t else 'CONFIGURAR URL','last_valid_date':t.get('last_valid_date') if t else None}]
+    return {'mode':'REAL','as_of':now().isoformat(),'cutoff_date':today().isoformat(),'sources':src,'births':b or {'value':None},'floor':{'value':c.get('value') if c else None,'capacity':27,'last_valid_date':c.get('last_valid_date') if c else None},'labor':{'value':c.get('labor') if c else None,'capacity':9,'last_valid_date':c.get('last_valid_date') if c else None},'triage':{'value':t.get('value') if t else None,'last_valid_date':t.get('last_valid_date') if t else None}}
+def poisson(lam,rng):
+    l=math.exp(-lam);k=0;q=1
+    while q>l:k+=1;q*=rng.random()
+    return k-1
+def simulate(days=7,params=None):
+    p=dict(BASE);p.update(params or {});rng=random.Random(int(p['seed']));rows=[];floor=p['initial_floor_occupancy'];labor=p['initial_labor_occupancy']
+    for d in range(days):
+        adm=poisson(float(p['admissions_day']),rng);births=poisson(float(p['births_day']),rng);cs=sum(rng.random()<p['cesarean_probability'] for _ in range(births)); admitted=sum(rng.random()<p['admission_probability'] for _ in range(adm));labor=max(0,min(p['labor_capacity'],labor+min(admitted,births)-births));floor=max(0,min(p['floor_capacity'],floor+admitted-poisson(max(1,floor/1.2),rng)));rows.append({'day':d+1,'emergency_arrivals':adm,'hospital_admissions':admitted,'labor_occupancy':labor,'labor_capacity':p['labor_capacity'],'births':births,'vaginal':births-cs,'cesareans':cs,'floor_occupancy':floor,'floor_pct':round(100*floor/p['floor_capacity'],1),'triage_queue':max(0,round(adm/24*p['triage_minutes']/60-p['physicians_per_shift']))})
+    return {'mode':'SIMULADO','days':rows,'summary':{'emergency_arrivals':sum(x['emergency_arrivals'] for x in rows),'births':sum(x['births'] for x in rows),'peak_floor_pct':max(x['floor_pct'] for x in rows),'peak_labor_occupancy':max(x['labor_occupancy'] for x in rows)},'parameters':p}
 @app.route('/')
-def home(): return render_template('index.html')
+def home():return render_template('index.html')
 @app.route('/health')
-def health(): return jsonify({"status":"ok","service":"AVICO Gemelo Digital","server_time":now().isoformat(),"pheds_positions":len(PHEDS)})
+def health():return jsonify({'status':'ok','server_time':now().isoformat(),'pheds_positions':len(PHEDS)})
 @app.route('/api/config')
-def config(): return jsonify(BASE)
+def config():return jsonify(BASE)
 @app.route('/api/pheds')
-def pheds(): return jsonify({"total":len(PHEDS),"positions":PHEDS})
+def pheds():return jsonify({'total':len(PHEDS),'positions':PHEDS})
 @app.route('/api/sources')
-def api_sources(): return jsonify(sources())
+def sources():return jsonify(real_state()['sources'])
 @app.route('/api/real-state')
-def api_real_state(): return jsonify(real_state())
+def state():return jsonify(real_state())
 @app.route('/api/simulate',methods=['POST'])
-def api_simulate():
-    b=request.get_json(silent=True) or {}; return jsonify(simulate(int(b.get('days',7)),b.get('parameters')))
+def sim():
+    b=request.get_json(silent=True) or {};return jsonify(simulate(int(b.get('days',7)),b.get('parameters')))
 @app.route('/api/predict')
 def predict():
-    b=simulate(1)['days'][0]
-    def h(n): return {"floor_pct":min(100,b['floor_pct']+round(n*1.3)),"labor_pct":min(100,b['labor_pct']+round(n*2.2)),"triage_queue":b['triage_queue']+max(0,n//3)}
-    return jsonify({"mode":"PREDICHO","plus_2h":h(2),"plus_4h":h(4),"plus_6h":h(6),"warning":"Predicción operativa V1; no es un modelo clínico validado."})
-if __name__=='__main__': app.run(host='0.0.0.0',port=10000)
+    r=real_state();return jsonify({'mode':'PREDICHO','plus_2h':{'floor_pct':0,'labor_pct':0,'triage_queue':0},'plus_4h':{'floor_pct':0,'labor_pct':0,'triage_queue':0},'plus_6h':{'floor_pct':0,'labor_pct':0,'triage_queue':0},'warning':'Predicción suspendida hasta disponer de las tres fuentes reales simultáneamente.'})
+if __name__=='__main__':app.run(host='0.0.0.0',port=10000)
