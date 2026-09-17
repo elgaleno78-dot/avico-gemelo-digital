@@ -5,12 +5,13 @@ import requests
 from openpyxl import load_workbook
 app=Flask(__name__); TZ=ZoneInfo('America/Cancun')
 BASE={'seed':20260917,'admissions_day':30.5,'births_day':7.5,'cesarean_probability':.41,'admission_probability':.55,'floor_capacity':27,'initial_floor_occupancy':22,'labor_capacity':9,'initial_labor_occupancy':4,'physicians_per_shift':4,'triage_minutes':35}
+# Maestro PHEDS verificado contra camas.xlsx. Nomenclaturas normalizadas (T010→T10; sufijo … retirado).
 PHEDS=[]
-for i in range(1,25): PHEDS.append({'id':f'H{i:02d}','area':'Hospitalización GO','censable':True})
-for i in range(25,28): PHEDS.append({'id':f'H{i:02d}','area':'Hospitalización GO · Aislamiento','censable':True})
-for i in range(1,11): PHEDS.append({'id':f'T{i:02d}','area':'Tococirugía','censable':False})
-PHEDS += [{'id':'E01','area':'Expulsión','censable':False},{'id':'M01','area':'Sala Mixta','censable':False},{'id':'UT01','area':'Urgencias Tococirugía','censable':False}]
-for i in range(1,6): PHEDS.append({'id':f'RP{i:02d}','area':'Recuperación Postparto','censable':False})
+for i in range(1,25): PHEDS.append({'id':str(i),'area':'Hospitalización GO','oxygen':True,'isolation':False,'sex':'MUJER','censable':True,'fictitious':False})
+for i in range(25,28): PHEDS.append({'id':str(i),'area':'Hospitalización GO · Aislamiento','oxygen':True,'isolation':True,'sex':'MUJER','censable':True,'fictitious':False})
+for i in range(1,11): PHEDS.append({'id':f'T{i:02d}','area':'Tococirugía','oxygen':i!=10,'isolation':False,'sex':'MUJER','censable':False,'fictitious':False})
+PHEDS += [{'id':'E01','area':'Expulsión','oxygen':True,'isolation':False,'sex':'MUJER','censable':False,'fictitious':False},{'id':'M01','area':'Sala Mixta','oxygen':True,'isolation':False,'sex':'MUJER','censable':False,'fictitious':False},{'id':'UT01','area':'Urgencias Tococirugía','oxygen':True,'isolation':False,'sex':'MUJER','censable':False,'fictitious':True}]
+for i in range(1,6): PHEDS.append({'id':f'RP{i:02d}','area':'Recuperación Postparto','oxygen':i!=5,'isolation':False,'sex':'MUJER','censable':False,'fictitious':False})
 def now(): return datetime.datetime.now(TZ)
 def today(): return now().date()
 def normdate(v):
@@ -63,8 +64,8 @@ def live_xlsx(url,kind):
     except Exception as e:return {'value':None,'last_valid_date':None,'status':'SIN CONEXIÓN','error':str(e)[:100]}
 def real_state():
     b=live_births(); c=live_xlsx(os.getenv('CENSUS_XLSX_URL'),'census'); t=live_xlsx(os.getenv('TRIAGE_XLSX_URL'),'triage')
-    src=[{'name':'Nacimientos 2026','status':b['status'] if b else 'SIN CONEXIÓN','last_valid_date':b.get('last_valid_date') if b else None},{'name':'Censo Piso / Labor','status':c['status'] if c else 'CONFIGURAR URL','last_valid_date':c.get('last_valid_date') if c else None},{'name':'Urgencias / Triage','status':t['status'] if t else 'CONFIGURAR URL','last_valid_date':t.get('last_valid_date') if t else None}]
-    return {'mode':'REAL','as_of':now().isoformat(),'cutoff_date':today().isoformat(),'sources':src,'births':b or {'value':None},'floor':{'value':c.get('value') if c else None,'capacity':27,'last_valid_date':c.get('last_valid_date') if c else None},'labor':{'value':c.get('labor') if c else None,'capacity':9,'last_valid_date':c.get('last_valid_date') if c else None},'triage':{'value':t.get('value') if t else None,'last_valid_date':t.get('last_valid_date') if t else None}}
+    src=[{'name':'Nacimientos 2026','status':b['status'] if b else 'SIN CONEXIÓN','last_valid_date':b.get('last_valid_date') if b else None},{'name':'Censo Piso / Labor','status':c['status'] if c else 'CONFIGURAR URL','last_valid_date':c.get('last_valid_date') if c else None},{'name':'Urgencias / Triage','status':t['status'] if t else 'CONFIGURAR URL','last_valid_date':t.get('last_valid_date') if t else None},{'name':'Infraestructura PHEDS','status':'REAL · MAESTRO','last_valid_date':today().isoformat()}]
+    return {'mode':'REAL','as_of':now().isoformat(),'cutoff_date':today().isoformat(),'sources':src,'births':b or {'value':None},'floor':{'value':c.get('value') if c else None,'capacity':27,'last_valid_date':c.get('last_valid_date') if c else None},'labor':{'value':c.get('labor') if c else None,'capacity':9,'last_valid_date':c.get('last_valid_date') if c else None},'triage':{'value':t.get('value') if t else None,'last_valid_date':t.get('last_valid_date') if t else None},'infrastructure':{'total':len(PHEDS),'censable':sum(x['censable'] for x in PHEDS),'functional':sum(not x['censable'] for x in PHEDS)}}
 def poisson(lam,rng):
     l=math.exp(-lam);k=0;q=1
     while q>l:k+=1;q*=rng.random()
@@ -77,11 +78,11 @@ def simulate(days=7,params=None):
 @app.route('/')
 def home():return render_template('index.html')
 @app.route('/health')
-def health():return jsonify({'status':'ok','server_time':now().isoformat(),'pheds_positions':len(PHEDS)})
+def health():return jsonify({'status':'ok','server_time':now().isoformat(),'pheds_positions':len(PHEDS),'pheds_censable':sum(x['censable'] for x in PHEDS),'pheds_functional':sum(not x['censable'] for x in PHEDS)})
 @app.route('/api/config')
 def config():return jsonify(BASE)
 @app.route('/api/pheds')
-def pheds():return jsonify({'total':len(PHEDS),'positions':PHEDS})
+def pheds():return jsonify({'total':len(PHEDS),'censable':sum(x['censable'] for x in PHEDS),'functional':sum(not x['censable'] for x in PHEDS),'positions':PHEDS})
 @app.route('/api/sources')
 def sources():return jsonify(real_state()['sources'])
 @app.route('/api/real-state')
@@ -91,5 +92,5 @@ def sim():
     b=request.get_json(silent=True) or {};return jsonify(simulate(int(b.get('days',7)),b.get('parameters')))
 @app.route('/api/predict')
 def predict():
-    r=real_state();return jsonify({'mode':'PREDICHO','plus_2h':{'floor_pct':0,'labor_pct':0,'triage_queue':0},'plus_4h':{'floor_pct':0,'labor_pct':0,'triage_queue':0},'plus_6h':{'floor_pct':0,'labor_pct':0,'triage_queue':0},'warning':'Predicción suspendida hasta disponer de las tres fuentes reales simultáneamente.'})
+    return jsonify({'mode':'PREDICHO','plus_2h':{'floor_pct':0,'labor_pct':0,'triage_queue':0},'plus_4h':{'floor_pct':0,'labor_pct':0,'triage_queue':0},'plus_6h':{'floor_pct':0,'labor_pct':0,'triage_queue':0},'warning':'Predicción suspendida hasta disponer de las tres fuentes reales simultáneamente.'})
 if __name__=='__main__':app.run(host='0.0.0.0',port=10000)
