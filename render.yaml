@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: avico-gemelo-digital
+    name: gemelo-ii-viviente
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt

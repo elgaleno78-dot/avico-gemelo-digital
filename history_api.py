@@ -1,9 +1,11 @@
 import source_patch as patched
+import ingestion_api
 from app import normdate,normtime,today
 from flask import jsonify,request
 from openpyxl import load_workbook
 import os,io,re,datetime,csv,requests,unicodedata
 app=patched.app; getbytes=patched.getbytes
+ingestion_api.register(app, getbytes)
 EXPECTED={str(300+i):f'{i:02d}' for i in range(1,25)};EXPECTED.update({f'AISL{i}':f'{24+i:02d}' for i in range(1,4)})
 def clean(s):return ''.join(c for c in unicodedata.normalize('NFD',str(s or '').upper()) if unicodedata.category(c)!='Mn')
 def bedkey(raw):
