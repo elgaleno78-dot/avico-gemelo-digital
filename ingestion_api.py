@@ -1,11 +1,15 @@
-import io, re, unicodedata, datetime
+import io, re, unicodedata, datetime, statistics, hashlib, tempfile, os
+from collections import Counter
 from flask import jsonify, request
 import pandas as pd
 from openpyxl import load_workbook
+import gdown
 
 MAX_BYTES = 20 * 1024 * 1024
-SAMPLE_ROWS = 1200
+SAMPLE_ROWS = 5000
+EMPTY_STOP = 80
 ID_WORDS = ('expediente','curp','folio','nombre','paciente','nacimiento','fecha','hora')
+DRIVE_CACHE={}
 
 def clean_name(value):
     text = unicodedata.normalize('NFD', str(value or '').strip().lower())
@@ -33,6 +37,27 @@ def classify_values(name, values):
     if unique<=20 or unique/max(len(vals),1)<.12:return 'categórica'
     return 'identificador/texto' if any(k in clean_name(name) for k in ID_WORDS) else 'texto libre'
 
+def safe_value(value):
+    if isinstance(value,(datetime.datetime,datetime.date,datetime.time)):return value.isoformat()
+    if isinstance(value,float):return round(value,2)
+    return str(value)[:100]
+
+def summarize_values(name, values, kind):
+    vals=[v for v in values if v is not None and str(v).strip()!='']
+    if not vals:return {'summary':'Sin datos'}
+    if kind.startswith('numérica'):
+        nums=[float(v) for v in vals if isinstance(v,(int,float)) and not isinstance(v,bool)]
+        if not nums:return {'summary':'Sin valores numéricos válidos'}
+        modes=statistics.multimode(nums);mode=modes[0] if len(modes)==1 else None
+        return {'mean':round(statistics.fmean(nums),2),'median':round(statistics.median(nums),2),'mode':round(mode,2) if mode is not None else 'Sin moda única','min':round(min(nums),2),'max':round(max(nums),2),'summary':f'Media {statistics.fmean(nums):.2f} · Mediana {statistics.median(nums):.2f} · Moda {mode if mode is not None else "no única"}'}
+    if kind=='fecha/hora':
+        ordered=sorted(safe_value(v) for v in vals);return {'min':ordered[0],'max':ordered[-1],'summary':f'{ordered[0]} → {ordered[-1]}'}
+    if kind in ('categórica','numérica discreta'):
+        counts=Counter(safe_value(v) for v in vals);top=[]
+        for value,count in counts.most_common(8):top.append({'value':value,'count':count,'percent':round(100*count/len(vals),1)})
+        return {'mode':top[0]['value'] if top else None,'frequencies':top,'summary':' · '.join(f'{x["value"]}: {x["count"]} ({x["percent"]}%)' for x in top[:3])}
+    return {'summary':'Variable identificadora o texto libre; no se muestran valores'}
+
 def read_book(raw, filename):
     ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else ''
     if ext not in ('xlsx','xls'): raise ValueError('Formato no admitido. Use .xlsx o .xls')
@@ -41,27 +66,33 @@ def read_book(raw, filename):
 def profile_xlsx(raw, filename):
     wb=load_workbook(io.BytesIO(raw),read_only=True,data_only=True);sheets=[];all_columns=set();total=0
     for ws in wb.worksheets:
-        rows=ws.iter_rows(values_only=True);header=None
-        for _ in range(30):
-            row=next(rows,None)
+        header=None;header_row=0;last_col=0
+        rows=ws.iter_rows(min_row=1,max_row=30,values_only=True)
+        for rn,row in enumerate(rows,1):
             if row is None:break
-            if sum(v is not None and str(v).strip()!='' for v in row)>=2:
-                header=[str(v).strip() if v is not None else f'Columna {i+1}' for i,v in enumerate(row)];break
+            populated=[i for i,v in enumerate(row,1) if v is not None and str(v).strip()!='']
+            if len(populated)>=2:
+                header_row=rn;last_col=max(populated);header=[str(v).strip() if v is not None and str(v).strip() else f'Columna {i+1}' for i,v in enumerate(row[:last_col])];break
         if not header:
             sheets.append({'name':ws.title,'rows':0,'columns':0,'variables':[],'sampled':False});continue
-        cols=[[] for _ in header];sampled=0
-        for row in rows:
+        cols=[[] for _ in header];sampled=0;empty_run=0
+        for row in ws.iter_rows(min_row=header_row+1,max_col=last_col,values_only=True):
+            if not any(v is not None and str(v).strip()!='' for v in row):
+                empty_run+=1
+                if empty_run>=EMPTY_STOP:break
+                continue
+            empty_run=0
             if sampled>=SAMPLE_ROWS:break
-            if not any(v is not None and str(v).strip()!='' for v in row):continue
-            sampled+=1
+            sampled += 1
             for i in range(len(header)):cols[i].append(row[i] if i<len(row) else None)
-        estimated=max(0,(ws.max_row or 1)-1);total+=estimated;variables=[]
+        actual=sampled;total+=actual;variables=[]
         for name,values in zip(header,cols):
             key=clean_name(name);all_columns.add(key);non_null=sum(v is not None and str(v).strip()!='' for v in values)
-            variables.append({'original':name,'key':key,'type':classify_values(name,values),'rows':estimated,'non_null':non_null,'missing_pct':round(100*(sampled-non_null)/max(sampled,1),1),'unique':len({str(v)[:200] for v in values if v is not None}),'sample_size':sampled})
-        sheets.append({'name':ws.title,'rows':estimated,'columns':len(variables),'variables':variables,'sampled':sampled<estimated,'sample_size':sampled})
+            kind=classify_values(name,values)
+            variables.append({'original':name,'key':key,'type':kind,'rows':actual,'non_null':non_null,'missing_pct':round(100*(actual-non_null)/max(actual,1),1),'unique':len({str(v)[:200] for v in values if v is not None}),'sample_size':actual,'statistics':summarize_values(name,values,kind)})
+        sheets.append({'name':ws.title,'rows':actual,'columns':len(variables),'variables':variables,'sampled':actual>=SAMPLE_ROWS,'sample_size':actual,'declared_dimensions':f'{ws.max_row} × {ws.max_column}','detected_dimensions':f'{actual} × {last_col}'})
     wb.close();keys=sorted(k for k in all_columns if any(word in k for word in ID_WORDS))
-    return {'file':filename,'sheets':sheets,'rows_total':total,'variables_total':sum(x['columns'] for x in sheets),'candidate_link_keys':keys,'privacy':'No se devuelven valores de pacientes','method':f'Exploración rápida; máximo {SAMPLE_ROWS} filas por hoja'}
+    return {'file':filename,'sheets':sheets,'rows_total':total,'variables_total':sum(x['columns'] for x in sheets),'candidate_link_keys':keys,'privacy':'No se devuelven identificadores individuales','method':f'Detección de rango real; máximo {SAMPLE_ROWS} registros por hoja'}
 
 def profile(raw, filename):
     if filename.lower().endswith('.xlsx'):return profile_xlsx(raw,filename)
@@ -109,3 +140,38 @@ def register(app, getbytes):
             if len(raw)>MAX_BYTES:raise ValueError('El archivo excede 20 MB')
             return jsonify(profile(raw,body.get('name') or 'fuente_drive.xlsx'))
         except Exception as e:return jsonify({'error':str(e)[:240]}),400
+
+    @app.post('/api/drive/folder')
+    def drive_folder():
+        body=request.get_json(silent=True) or {};url=str(body.get('url') or '').strip()
+        if not re.search(r'drive\.google\.com/drive/(?:u/\d+/)?folders/[A-Za-z0-9_-]+',url):return jsonify({'error':'Use un enlace válido de carpeta de Google Drive'}),400
+        try:
+            found=gdown.download_folder(url=url,skip_download=True,quiet=True,remaining_ok=True) or []
+            items=[];counts={};mapping={}
+            for f in found:
+                if not str(f.path).lower().endswith(('.xlsx','.xls')):continue
+                month=(str(f.path).split('/')[0] or 'SIN MES').strip().upper();counts[month]=counts.get(month,0)+1
+                token=hashlib.sha256(str(f.id).encode()).hexdigest()[:20];mapping[token]=str(f.id)
+                items.append({'token':token,'month':month,'alias':f'HC-{counts[month]:04d}.xlsx'})
+            cache_key=hashlib.sha256(url.encode()).hexdigest()[:16];DRIVE_CACHE[cache_key]=mapping
+            return jsonify({'folder_key':cache_key,'total_files':len(items),'months':[{'month':m,'files':n} for m,n in sorted(counts.items())],'files':items,'privacy':'Nombres originales ocultos; archivos pseudonimizados en pantalla'})
+        except Exception as e:return jsonify({'error':'No fue posible enumerar la carpeta: '+str(e)[:180]}),400
+
+    @app.post('/api/drive/analyze')
+    def drive_analyze():
+        body=request.get_json(silent=True) or {};folder_key=str(body.get('folder_key') or '');token=str(body.get('token') or '')
+        file_id=DRIVE_CACHE.get(folder_key,{}).get(token)
+        if not file_id:return jsonify({'error':'La sesión de Drive expiró. Vuelva a conectar la carpeta.'}),400
+        path=None
+        try:
+            fd,path=tempfile.mkstemp(suffix='.xlsx');os.close(fd)
+            result=gdown.download(id=file_id,output=path,quiet=True)
+            if not result:raise ValueError('Drive no entregó el archivo')
+            with open(path,'rb') as h:raw=h.read(MAX_BYTES+1)
+            if len(raw)>MAX_BYTES:raise ValueError('El archivo excede 20 MB')
+            return jsonify(profile(raw,'Historia clínica pseudonimizada.xlsx'))
+        except Exception as e:return jsonify({'error':'No fue posible analizar el archivo de Drive: '+str(e)[:180]}),400
+        finally:
+            if path and os.path.exists(path):
+                try:os.unlink(path)
+                except:pass

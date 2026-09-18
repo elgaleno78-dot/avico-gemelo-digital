@@ -7,3 +7,4 @@ google-auth==2.35.0
 pandas==2.2.3
 scipy==1.14.1
 xlrd==2.0.1
+gdown==5.2.0
